@@ -109,12 +109,13 @@ You can also create a `.env` file in the project root.
 
 ## Authentication
 
-1. Run `find-my-phone login` to open Google consent in your browser
-2. Approve access (uses your existing Google session)
-3. The browser redirects to localhost, the tool captures the auth code
-4. Tokens are cached in `~/.config/find-my-phone/secrets.json` and auto-refreshed
+1. Run `find-my-phone login`
+2. The tool reads your Chrome session cookies (via `pycookiecheat`) and silently obtains an OAuth token
+3. If silent auth fails, it opens Google's EmbeddedSetup page in your browser for manual login
+4. The OAuth token is exchanged via `gpsoauth` for an AAS master token, then an ADM scoped token
+5. Tokens are cached in `~/.config/find-my-phone/secrets.json`
 
-Requires OAuth2 client credentials at `~/.credentials/scm-pwd-web.json`.
+**Note:** The `android_device_manager` API scope is restricted to internal Google apps, so standard OAuth2 cannot be used. Authentication goes through `gpsoauth` (Android auth protocol).
 
 ## Log Files
 

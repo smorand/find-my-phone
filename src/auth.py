@@ -1,6 +1,9 @@
 """Authentication module for Google Find My Device API.
 
-Uses standard OAuth2 flow with localhost redirect for user consent.
+Reads Google session cookies from the user's Chrome browser, uses them
+to obtain an oauth_token from EmbeddedSetup, then exchanges it via
+gpsoauth for an Android Device Manager scoped token.
+
 Tokens are cached in ~/.config/find-my-phone/secrets.json.
 """
 
@@ -9,9 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-import urllib.parse
 from typing import TYPE_CHECKING, Any
 
+import gpsoauth
 import httpx
 
 from tracing import trace_span
@@ -23,13 +26,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-OAUTH2_AUTH_URL = "https://accounts.google.com/o/oauth2/auth"
-OAUTH2_EXCHANGE_URL = "https://oauth2.googleapis.com/token"
-OAUTH2_SCOPE = "https://www.googleapis.com/auth/android_device_manager"
+ADM_APP = "com.google.android.apps.adm"
+ADM_CLIENT_SIG = "38918a453d07199354f8b19af05ec6562ced5788"
+ADM_SCOPE = "oauth2:https://www.googleapis.com/auth/android_device_manager"
 
-CREDENTIALS_PATH = "~/.credentials/scm-pwd-web.json"
-LOCAL_SERVER_TIMEOUT = 300
-LOCAL_SERVER_PORT = 8002
+EMBEDDED_SETUP_URL = "https://accounts.google.com/EmbeddedSetup"
+COOKIE_POLL_INTERVAL = 2
+COOKIE_POLL_TIMEOUT = 300
 
 
 def _get_secrets_path(settings: Settings) -> Path:
@@ -73,202 +76,152 @@ def _get_android_id(settings: Settings) -> str:
     return android_id
 
 
-def _load_client_credentials() -> dict[str, str]:
-    """Load OAuth2 client credentials from the credentials file."""
-    from pathlib import Path  # noqa: PLC0415
+def _get_chrome_cookies() -> dict[str, str]:
+    """Read Google session cookies from the user's Chrome browser."""
+    from pycookiecheat import chrome_cookies  # noqa: PLC0415
 
-    creds_path = Path(CREDENTIALS_PATH).expanduser()
-    if not creds_path.exists():
-        msg = f"OAuth2 credentials not found at {creds_path}"
-        raise FileNotFoundError(msg)
-
-    with creds_path.open("r", encoding="utf-8") as fh:
-        raw: dict[str, Any] = json.load(fh)
-
-    web_config = raw.get("web", {})
-    client_id = web_config.get("client_id", "")
-    client_secret = web_config.get("client_secret", "")
-
-    if not client_id or not client_secret:
-        msg = "Missing client_id or client_secret in credentials file"
-        raise ValueError(msg)
-
-    return {"client_id": client_id, "client_secret": client_secret}
+    cookies: dict[str, str] = chrome_cookies("https://accounts.google.com")
+    return cookies
 
 
-def _wait_for_auth_code() -> str:
-    """Start a local HTTP server and wait for the OAuth2 callback with auth code."""
-    import http.server  # noqa: PLC0415
-    import threading  # noqa: PLC0415
+def _obtain_oauth_token_from_cookies(chrome_cookies_dict: dict[str, str]) -> str:
+    """Use existing Chrome cookies to obtain an oauth_token from EmbeddedSetup.
 
-    auth_code: str | None = None
-    error: str | None = None
-
-    class CallbackHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            nonlocal auth_code, error
-            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-
-            if "code" in params:
-                auth_code = params["code"][0]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"<html><body><h2>Login successful!</h2><p>You can close this tab.</p></body></html>")
-            elif "error" in params:
-                error = params["error"][0]
-                self.send_response(400)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(f"<html><body><h2>Login failed: {error}</h2></body></html>".encode())
-            else:
-                self.send_response(400)
-                self.end_headers()
-
-        def log_message(self, format: str, *args: Any) -> None:
-            logger.debug(format, *args)
-
-    server = http.server.HTTPServer(("127.0.0.1", LOCAL_SERVER_PORT), CallbackHandler)
-    server.timeout = LOCAL_SERVER_TIMEOUT
-
-    server_thread = threading.Thread(target=server.handle_request, daemon=True)
-    server_thread.start()
-    server_thread.join(timeout=LOCAL_SERVER_TIMEOUT)
-    server.server_close()
-
-    if error:
-        msg = f"OAuth2 login denied: {error}"
-        raise RuntimeError(msg)
-
-    if not auth_code:
-        msg = "Timed out waiting for login. Did you complete the consent in your browser?"
-        raise RuntimeError(msg)
-
-    return auth_code
-
-
-def request_oauth2_token(settings: Settings) -> str:
-    """Run standard OAuth2 flow: open browser for consent, receive token via localhost redirect.
-
-    Opens the Google consent page in the user's default browser (respects existing
-    session), then waits for the redirect on a local HTTP server to capture the
-    auth code. Exchanges the code for access and refresh tokens.
-
-    Returns the access token.
+    Makes an HTTP request to EmbeddedSetup with the user's Google session
+    cookies. If the session is valid, Google sets the oauth_token cookie
+    without requiring interactive login.
     """
+    with httpx.Client(follow_redirects=True, timeout=30.0) as client:
+        response = client.get(EMBEDDED_SETUP_URL, cookies=chrome_cookies_dict)
+
+    oauth_token = response.cookies.get("oauth_token")
+    if not oauth_token:
+        logger.debug("EmbeddedSetup response status: %s", response.status_code)
+        logger.debug("EmbeddedSetup cookies received: %s", list(response.cookies.keys()))
+        msg = "Could not obtain oauth_token from your Chrome session. Make sure you are logged into Google in Chrome."
+        raise RuntimeError(msg)
+
+    return oauth_token
+
+
+def _obtain_oauth_token_via_browser() -> str:
+    """Fall back to opening EmbeddedSetup in browser and polling Chrome cookies."""
+    import time  # noqa: PLC0415
     import webbrowser  # noqa: PLC0415
 
-    creds = _load_client_credentials()
-    redirect_uri = f"http://localhost:{LOCAL_SERVER_PORT}/"
+    logger.info("Opening EmbeddedSetup in your browser for manual login...")
+    webbrowser.open(EMBEDDED_SETUP_URL)
 
-    auth_params = urllib.parse.urlencode(
-        {
-            "client_id": creds["client_id"],
-            "redirect_uri": redirect_uri,
-            "scope": OAUTH2_SCOPE,
-            "response_type": "code",
-            "access_type": "offline",
-            "prompt": "consent",
-        }
-    )
-    auth_url = f"{OAUTH2_AUTH_URL}?{auth_params}"
+    logger.info("Waiting for login completion (up to 5 minutes)...")
+    deadline = time.monotonic() + COOKIE_POLL_TIMEOUT
 
-    logger.info("Opening Google consent page in your browser...")
-    webbrowser.open(auth_url)
+    while time.monotonic() < deadline:
+        time.sleep(COOKIE_POLL_INTERVAL)
+        try:
+            cookies = _get_chrome_cookies()
+            if "oauth_token" in cookies:
+                return cookies["oauth_token"]
+        except Exception:
+            logger.debug("Cookie read attempt failed, retrying...")
 
-    logger.info("Waiting for authorization (up to 5 minutes)...")
-    code = _wait_for_auth_code()
+    msg = "Timed out waiting for oauth_token. Did you complete the login in Chrome?"
+    raise RuntimeError(msg)
 
-    logger.info("Exchanging authorization code for tokens...")
-    with httpx.Client() as client:
-        token_response = client.post(
-            OAUTH2_EXCHANGE_URL,
-            data={
-                "code": code,
-                "client_id": creds["client_id"],
-                "client_secret": creds["client_secret"],
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
+
+def request_oauth_token(settings: Settings) -> str:
+    """Obtain an oauth_token, preferring automatic cookie extraction.
+
+    First tries to read Chrome cookies and use them to silently obtain
+    the token. If that fails, falls back to opening the browser for
+    manual login.
+    """
+    _ = settings  # reserved for future use (e.g. Chrome profile config)
+    try:
+        logger.info("Reading Google session from Chrome cookies...")
+        cookies = _get_chrome_cookies()
+        if not cookies:
+            logger.info("No Chrome cookies found, falling back to browser login")
+            return _obtain_oauth_token_via_browser()
+
+        logger.info("Attempting silent authentication via Chrome session...")
+        return _obtain_oauth_token_from_cookies(cookies)
+    except RuntimeError:
+        logger.info("Silent auth failed, falling back to browser login")
+        return _obtain_oauth_token_via_browser()
+
+
+def exchange_for_aas_token(settings: Settings, oauth_token: str) -> str:
+    """Exchange oauth_token for an AAS (Android Auth Service) master token."""
+    with trace_span("auth.exchange_aas_token"):
+        android_id = _get_android_id(settings)
+
+        response: dict[str, str] = gpsoauth.exchange_token(
+            email="",
+            token=oauth_token,
+            android_id=android_id,
         )
-        token_data = token_response.json()
 
-    if "access_token" not in token_data:
-        logger.error("Token exchange failed: %s", token_data)
-        msg = f"Token exchange failed: {token_data.get('error_description', token_data.get('error', 'unknown'))}"
-        raise RuntimeError(msg)
+        if "Token" not in response:
+            logger.error("AAS token exchange failed: %s", response)
+            msg = f"AAS token exchange failed: {response.get('Error', 'unknown error')}"
+            raise RuntimeError(msg)
 
-    cache = _load_secrets(settings)
-    cache["access_token"] = token_data["access_token"]
-    if "refresh_token" in token_data:
-        cache["refresh_token"] = token_data["refresh_token"]
-    _save_secrets(settings, cache)
+        aas_token: str = response["Token"]
 
-    access_token: str = token_data["access_token"]
-    logger.info("OAuth2 tokens obtained and cached")
-    return access_token
-
-
-def refresh_access_token(settings: Settings) -> str:
-    """Refresh the access token using the cached refresh token."""
-    with trace_span("auth.refresh_token"):
         cache = _load_secrets(settings)
-        refresh_token = cache.get("refresh_token")
-        if not refresh_token:
-            msg = "No refresh token cached. Run 'find-my-phone login' first."
-            raise RuntimeError(msg)
-
-        creds = _load_client_credentials()
-
-        with httpx.Client() as client:
-            response = client.post(
-                OAUTH2_EXCHANGE_URL,
-                data={
-                    "client_id": creds["client_id"],
-                    "client_secret": creds["client_secret"],
-                    "refresh_token": refresh_token,
-                    "grant_type": "refresh_token",
-                },
-            )
-            token_data = response.json()
-
-        if "access_token" not in token_data:
-            logger.error("Token refresh failed: %s", token_data)
-            msg = "Token refresh failed. Run 'find-my-phone login' again."
-            raise RuntimeError(msg)
-
-        cache["access_token"] = token_data["access_token"]
+        cache["aas_token"] = aas_token
+        if "Email" in response:
+            cache["username"] = response["Email"]
         _save_secrets(settings, cache)
 
-        result: str = token_data["access_token"]
-        logger.info("Access token refreshed")
-        return result
+        logger.info("AAS token obtained for %s", cache.get("username", "unknown"))
+        return aas_token
 
 
 def get_adm_token(settings: Settings) -> str:
-    """Get a valid access token for the Android Device Manager API.
+    """Get an ADM (Android Device Manager) scoped OAuth token.
 
-    First tries the cached access token. If that fails (expired),
-    refreshes it using the cached refresh token.
+    Uses the cached AAS token to request a scoped token via gpsoauth.
     """
     with trace_span("auth.get_adm_token"):
         cache = _load_secrets(settings)
-        access_token = cache.get("access_token")
-        if not access_token:
+        aas_token = cache.get("aas_token")
+        if not aas_token:
             msg = "Not logged in. Run 'find-my-phone login' first."
             raise RuntimeError(msg)
-        result: str = access_token
-        return result
+
+        username = cache.get("username", "")
+        android_id = _get_android_id(settings)
+
+        response: dict[str, str] = gpsoauth.perform_oauth(
+            email=username,
+            master_token=aas_token,
+            android_id=android_id,
+            service=ADM_SCOPE,
+            app=ADM_APP,
+            client_sig=ADM_CLIENT_SIG,
+        )
+
+        if "Auth" not in response:
+            logger.error("ADM token request failed: %s", response)
+            msg = "ADM token request failed. Try running 'find-my-phone login' again."
+            raise RuntimeError(msg)
+
+        token: str = response["Auth"]
+        logger.debug("ADM token obtained")
+        return token
 
 
 def login(settings: Settings) -> str:
-    """Full login flow: OAuth2 consent in browser -> exchange code -> cache tokens."""
-    access_token = request_oauth2_token(settings)
+    """Full login flow: Chrome cookies -> oauth_token -> AAS token -> ADM token."""
+    oauth_token = request_oauth_token(settings)
+    exchange_for_aas_token(settings, oauth_token)
+    adm_token = get_adm_token(settings)
     logger.info("Login successful. Tokens cached.")
-    return access_token
+    return adm_token
 
 
 def is_logged_in(settings: Settings) -> bool:
     """Check if we have cached credentials."""
     cache = _load_secrets(settings)
-    return bool(cache.get("refresh_token"))
+    return bool(cache.get("aas_token"))

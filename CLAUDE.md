@@ -66,12 +66,14 @@ This project follows the `python` skill. Reload it for full coding standards ref
 
 ## Architecture Notes
 
-- Auth flow: Standard OAuth2 with localhost redirect -> access token cached + auto refresh on 401
+- Auth flow: Chrome cookies (via pycookiecheat) -> EmbeddedSetup -> oauth_token -> gpsoauth AAS token -> ADM scoped token
+- Silent auth: reads Chrome session cookies, sends HTTP request to EmbeddedSetup to get oauth_token without browser interaction
+- Browser fallback: opens EmbeddedSetup in browser, polls Chrome cookie DB for oauth_token
+- The `android_device_manager` scope is restricted: standard OAuth2 returns invalid_scope, gpsoauth is required
 - Nova API: protobuf over HTTPS to `android.googleapis.com/nova/`
 - Location: parsed from device list response (last known), encrypted locations not yet supported
 - Ring: fire and forget (empty GCM registration ID)
 - Protobuf stubs (.pyi) are manually maintained for mypy compatibility
-- OAuth2 credentials: `~/.credentials/scm-pwd-web.json`
 
 ## Documentation Index
 

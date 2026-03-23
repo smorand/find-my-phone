@@ -18,6 +18,8 @@ dependencies = [
     "opentelemetry-api>=1.29.0",
     "opentelemetry-sdk>=1.29.0",
     "protobuf>=5.28.0",
+    "gpsoauth>=2.0.0",
+    "pycookiecheat>=0.8.0",
 ]
 
 [dependency-groups]
@@ -102,7 +104,7 @@ show_error_codes = true
 show_column_numbers = true
 
 [[tool.mypy.overrides]]
-module = ["httpx.*", "opentelemetry.*", "uvicorn.*", "gpsoauth.*", "undetected_chromedriver.*", "selenium.*", "google.protobuf.*", "grpc_tools.*"]
+module = ["httpx.*", "opentelemetry.*", "uvicorn.*", "gpsoauth.*", "pycookiecheat", "pycookiecheat.*", "google.protobuf.*", "grpc_tools.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
