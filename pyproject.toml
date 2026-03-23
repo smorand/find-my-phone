@@ -19,7 +19,6 @@ dependencies = [
     "opentelemetry-sdk>=1.29.0",
     "gpsoauth>=1.1.1",
     "protobuf>=5.28.0",
-    "selenium>=4.27.1",
 ]
 
 [dependency-groups]

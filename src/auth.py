@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-import shutil
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import gpsoauth
 
@@ -69,106 +69,87 @@ def _get_android_id(settings: Settings) -> str:
     return android_id
 
 
-CHROME_COOKIE_FILES = ("Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Web Data")
-CHROME_WAIT_SECONDS = 3
-CHROME_TERMINATE_TIMEOUT = 10
+EMBEDDED_SETUP_URL = "https://accounts.google.com/EmbeddedSetup"
+COOKIE_POLL_INTERVAL = 2
+COOKIE_POLL_TIMEOUT = 300
+APPLESCRIPT_READ_COOKIE = """
+tell application "Google Chrome"
+    set targetTabIndex to -1
+    set targetWindowIndex to -1
+    repeat with w from 1 to (count of windows)
+        repeat with t from 1 to (count of tabs of window w)
+            if URL of tab t of window w starts with "https://accounts.google.com" then
+                set targetTabIndex to t
+                set targetWindowIndex to w
+                exit repeat
+            end if
+        end repeat
+        if targetTabIndex > 0 then exit repeat
+    end repeat
+    if targetTabIndex > 0 then
+        set active tab index of window targetWindowIndex to targetTabIndex
+        return execute tab targetTabIndex of window targetWindowIndex javascript "document.cookie"
+    else
+        return ""
+    end if
+end tell
+"""
 
 
-def _find_free_port() -> int:
-    """Find a free TCP port for Chrome remote debugging."""
-    import socket  # noqa: PLC0415
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _prepare_temp_profile(settings: Settings) -> str:
-    """Create a lightweight temp Chrome user data dir with session cookies from the real profile.
-
-    Only copies cookie and login files (a few MB) instead of the entire profile (GB+).
-    """
-    temp_dir = tempfile.mkdtemp(prefix="find_my_phone_chrome_")
-    source_profile = settings.chrome_user_data_dir / settings.chrome_profile
-    dest_profile = Path(temp_dir) / settings.chrome_profile
-    dest_profile.mkdir(parents=True, exist_ok=True)
-
-    if source_profile.exists():
-        logger.info("Copying session data from Chrome profile %s", settings.chrome_profile)
-        for filename in CHROME_COOKIE_FILES:
-            src = source_profile / filename
-            if src.exists():
-                shutil.copy2(src, dest_profile / filename)
-
-        prefs_src = source_profile / "Preferences"
-        if prefs_src.exists():
-            shutil.copy2(prefs_src, dest_profile / "Preferences")
-
-        local_state = settings.chrome_user_data_dir / "Local State"
-        if local_state.exists():
-            shutil.copy2(local_state, Path(temp_dir) / "Local State")
-    else:
-        logger.warning("Chrome profile not found at %s, using fresh profile", source_profile)
-
-    return temp_dir
+def _extract_oauth_token_from_cookies(cookie_string: str) -> str | None:
+    """Extract the oauth_token value from a cookie string."""
+    for part in cookie_string.split(";"):
+        key_value = part.strip().split("=", 1)
+        if len(key_value) == 2 and key_value[0].strip() == "oauth_token":  # noqa: PLR2004
+            return key_value[1].strip()
+    return None
 
 
-def request_oauth_token_via_chrome(settings: Settings) -> str:
-    """Launch a temporary Chrome instance with session cookies and extract oauth_token.
+def request_oauth_token_via_chrome() -> str:
+    """Open Google login in the user's existing Chrome and extract oauth_token.
 
-    Creates a lightweight temp profile with only cookie/login files from the
-    user's real Chrome profile, then launches Chrome with remote debugging
-    to automate the login flow via Selenium.
+    Opens a new tab in the running Chrome browser, then polls for
+    the oauth_token cookie via AppleScript. The user's existing
+    Google session is preserved.
 
     Returns the oauth_token value after user completes login.
     """
     import subprocess  # noqa: PLC0415  # nosec B404
     import time  # noqa: PLC0415
+    import webbrowser  # noqa: PLC0415
 
-    from selenium import webdriver  # noqa: PLC0415
-    from selenium.webdriver.support.ui import WebDriverWait  # noqa: PLC0415
+    logger.info("Opening Google login in your browser...")
+    webbrowser.open(EMBEDDED_SETUP_URL)
 
-    logger.info("Opening Chrome for Google login...")
+    logger.info("Waiting for login completion (up to 5 minutes)...")
+    deadline = time.monotonic() + COOKIE_POLL_TIMEOUT
 
-    temp_dir = _prepare_temp_profile(settings)
-    debug_port = _find_free_port()
+    while time.monotonic() < deadline:
+        time.sleep(COOKIE_POLL_INTERVAL)
 
-    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    chrome_args = [
-        chrome_path,
-        f"--remote-debugging-port={debug_port}",
-        f"--user-data-dir={temp_dir}",
-        f"--profile-directory={settings.chrome_profile}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "https://accounts.google.com/EmbeddedSetup",
-    ]
+        result = subprocess.run(  # nosec B603 B607
+            ["osascript", "-e", APPLESCRIPT_READ_COOKIE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
 
-    chrome_proc = subprocess.Popen(chrome_args)  # nosec B603
-    logger.info("Chrome launched with PID %d on debug port %d", chrome_proc.pid, debug_port)
+        if result.returncode != 0:
+            logger.debug("AppleScript returned error: %s", result.stderr.strip())
+            continue
 
-    try:
-        time.sleep(CHROME_WAIT_SECONDS)
+        cookie_str = result.stdout.strip()
+        if not cookie_str:
+            continue
 
-        options = webdriver.ChromeOptions()
-        options.debugger_address = f"127.0.0.1:{debug_port}"
-        driver = webdriver.Chrome(options=options)
+        token = _extract_oauth_token_from_cookies(cookie_str)
+        if token:
+            logger.info("OAuth token retrieved successfully")
+            return token
 
-        logger.info("Waiting for login completion (up to 5 minutes)...")
-        WebDriverWait(driver, 300).until(lambda d: d.get_cookie("oauth_token") is not None)
-
-        cookie = driver.get_cookie("oauth_token")
-        if not cookie:
-            msg = "Failed to retrieve oauth_token cookie"
-            raise RuntimeError(msg)
-        token: str = cookie["value"]
-        logger.info("OAuth token retrieved successfully")
-        return token
-    finally:
-        chrome_proc.terminate()
-        chrome_proc.wait(timeout=CHROME_TERMINATE_TIMEOUT)
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    msg = "Timed out waiting for oauth_token cookie. Did you complete the login?"
+    raise RuntimeError(msg)
 
 
 def exchange_for_aas_token(settings: Settings, oauth_token: str) -> str:
@@ -235,7 +216,7 @@ def get_adm_token(settings: Settings) -> str:
 
 def login(settings: Settings) -> str:
     """Full login flow: Chrome login -> AAS token -> verify ADM token works."""
-    oauth_token = request_oauth_token_via_chrome(settings)
+    oauth_token = request_oauth_token_via_chrome()
     exchange_for_aas_token(settings, oauth_token)
     adm_token = get_adm_token(settings)
     logger.info("Login successful. Tokens cached.")
