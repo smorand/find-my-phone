@@ -17,6 +17,10 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "opentelemetry-api>=1.29.0",
     "opentelemetry-sdk>=1.29.0",
+    "gpsoauth>=1.1.1",
+    "protobuf>=5.28.0",
+    "selenium>=4.27.1",
+    "undetected-chromedriver>=3.5.5",
 ]
 
 [dependency-groups]
@@ -28,6 +32,7 @@ dev = [
     "ruff>=0.9.0",
     "bandit>=1.8.0",
     "pre-commit>=4.0.0",
+    "grpcio-tools>=1.60.0",
 ]
 
 [project.scripts]
@@ -72,9 +77,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG", "PLR2004"]
+"src/proto/*_pb2.py" = ["ALL"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["find_my_phone", "config", "logging_config", "tracing"]
+known-first-party = ["find_my_phone", "config", "logging_config", "tracing", "auth", "device_manager", "proto"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -99,7 +105,11 @@ show_error_codes = true
 show_column_numbers = true
 
 [[tool.mypy.overrides]]
-module = ["httpx.*", "opentelemetry.*", "uvicorn.*"]
+module = ["httpx.*", "opentelemetry.*", "uvicorn.*", "gpsoauth.*", "undetected_chromedriver.*", "selenium.*", "google.protobuf.*", "grpc_tools.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["proto.*"]
 ignore_missing_imports = true
 
 # pytest
@@ -116,7 +126,7 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.coverage.run]
 source = ["src"]
 branch = true
-omit = ["tests/*", "*/__init__.py"]
+omit = ["tests/*", "*/__init__.py", "src/proto/*_pb2.py"]
 
 [tool.coverage.report]
 exclude_lines = [

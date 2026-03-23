@@ -10,16 +10,24 @@ CLI tool to locate and track Android phones. Built with Python 3.13, Typer, pyda
 make sync               # Install dependencies
 make run                # Run the CLI application
 make run ARGS='--help'  # Run with arguments
+make run ARGS='login'   # Login via Chrome
+make run ARGS='list'    # List devices
+make run ARGS='ring 1'  # Ring device by index
+make run ARGS='locate 1' # Locate device
 make check              # Full quality gate (lint, format, typecheck, security, tests+coverage)
+make proto              # Compile protobuf definitions
 make docker-build       # Build Docker image
 ```
 
 ## Project Structure
 
-- `src/find_my_phone.py` : CLI entry point (Typer app) with `locate` and `ring` commands
+- `src/find_my_phone.py` : CLI entry point (Typer app) with `login`, `list`, `locate`, `ring` commands
+- `src/auth.py` : Google auth (Chrome login, gpsoauth token exchange, secrets caching)
+- `src/device_manager.py` : Nova API client (list devices, ring, parse location from protobuf)
 - `src/config.py` : Settings via pydantic-settings (FIND_MY_PHONE_ prefix)
 - `src/logging_config.py` : Logging setup with rich + file output (<app>.log)
 - `src/tracing.py` : OpenTelemetry tracing with JSONL export (<app>-otel.log)
+- `src/proto/` : Protobuf definitions (.proto) and generated code (_pb2.py) with manual .pyi stubs
 - `tests/` : Unit tests
 - `tests/functional/` : Integration tests
 
@@ -55,6 +63,14 @@ Before considering any task complete:
 ## Coding Standards
 
 This project follows the `python` skill. Reload it for full coding standards reference.
+
+## Architecture Notes
+
+- Auth flow: Chrome login -> OAuth token -> gpsoauth AAS token -> ADM scoped token
+- Nova API: protobuf over HTTPS to `android.googleapis.com/nova/`
+- Location: parsed from device list response (last known), encrypted locations not yet supported
+- Ring: fire and forget (empty GCM registration ID)
+- Protobuf stubs (.pyi) are manually maintained for mypy compatibility
 
 ## Documentation Index
 

@@ -1,5 +1,7 @@
 """Application settings using pydantic-settings."""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,3 +20,4 @@ class Settings(BaseSettings):
 
     app_name: str = "find_my_phone"
     debug: bool = False
+    secrets_dir: Path = Path.home() / ".config" / "find-my-phone"

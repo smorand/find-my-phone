@@ -1,4 +1,4 @@
-.PHONY: sync run run-dev test lint lint-fix format format-check typecheck security check build install uninstall docker-build docker-push docker run-up run-down clean clean-all info help
+.PHONY: sync run run-dev test lint lint-fix format format-check typecheck security check build install uninstall docker-build docker-push docker run-up run-down clean clean-all info help proto
 
 # Auto-detect project name from pyproject.toml
 PROJECT_NAME=$(shell grep -m1 '^name' pyproject.toml 2>/dev/null | sed 's/.*= *"\([^"]*\)".*/\1/')
@@ -138,6 +138,16 @@ security:
 ## check: Run all quality checks (lint, format, typecheck, security, tests+coverage)
 check: lint format-check typecheck security test-cov
 	@echo "All checks passed!"
+
+# ============================================================================
+# PROTOBUF
+# ============================================================================
+
+## proto: Compile .proto files to Python
+proto:
+	@echo "Compiling protobuf files..."
+	@uv run python -m grpc_tools.protoc -Isrc --python_out=src src/proto/Common.proto src/proto/DeviceUpdate.proto
+	@echo "Protobuf compilation complete!"
 
 # ============================================================================
 # BUILD & INSTALL

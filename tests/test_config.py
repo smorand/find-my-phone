@@ -1,5 +1,7 @@
 """Tests for the config module."""
 
+from pathlib import Path
+
 import pytest
 
 from config import Settings
@@ -10,6 +12,7 @@ def test_default_settings() -> None:
     settings = Settings()
     assert settings.app_name == "find_my_phone"
     assert settings.debug is False
+    assert settings.secrets_dir == Path.home() / ".config" / "find-my-phone"
 
 
 def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
