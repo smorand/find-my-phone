@@ -69,43 +69,93 @@ def _get_android_id(settings: Settings) -> str:
     return android_id
 
 
-def request_oauth_token_via_chrome(settings: Settings) -> str:
-    """Open Chrome with existing profile and extract oauth_token cookie.
+CHROME_COOKIE_FILES = ("Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Web Data")
+CHROME_WAIT_SECONDS = 3
+CHROME_TERMINATE_TIMEOUT = 10
 
-    Copies the user's Chrome profile to a temp directory so Chrome
-    can run even if the main browser is already open. The user's
-    existing Google session is preserved, avoiding a fresh login.
+
+def _find_free_port() -> int:
+    """Find a free TCP port for Chrome remote debugging."""
+    import socket  # noqa: PLC0415
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+        return port
+
+
+def _prepare_temp_profile(settings: Settings) -> str:
+    """Create a lightweight temp Chrome user data dir with session cookies from the real profile.
+
+    Only copies cookie and login files (a few MB) instead of the entire profile (GB+).
+    """
+    temp_dir = tempfile.mkdtemp(prefix="find_my_phone_chrome_")
+    source_profile = settings.chrome_user_data_dir / settings.chrome_profile
+    dest_profile = Path(temp_dir) / settings.chrome_profile
+    dest_profile.mkdir(parents=True, exist_ok=True)
+
+    if source_profile.exists():
+        logger.info("Copying session data from Chrome profile %s", settings.chrome_profile)
+        for filename in CHROME_COOKIE_FILES:
+            src = source_profile / filename
+            if src.exists():
+                shutil.copy2(src, dest_profile / filename)
+
+        prefs_src = source_profile / "Preferences"
+        if prefs_src.exists():
+            shutil.copy2(prefs_src, dest_profile / "Preferences")
+
+        local_state = settings.chrome_user_data_dir / "Local State"
+        if local_state.exists():
+            shutil.copy2(local_state, Path(temp_dir) / "Local State")
+    else:
+        logger.warning("Chrome profile not found at %s, using fresh profile", source_profile)
+
+    return temp_dir
+
+
+def request_oauth_token_via_chrome(settings: Settings) -> str:
+    """Launch a temporary Chrome instance with session cookies and extract oauth_token.
+
+    Creates a lightweight temp profile with only cookie/login files from the
+    user's real Chrome profile, then launches Chrome with remote debugging
+    to automate the login flow via Selenium.
 
     Returns the oauth_token value after user completes login.
     """
-    import undetected_chromedriver as uc  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415  # nosec B404
+    import time  # noqa: PLC0415
+
+    from selenium import webdriver  # noqa: PLC0415
     from selenium.webdriver.support.ui import WebDriverWait  # noqa: PLC0415
 
     logger.info("Opening Chrome for Google login...")
 
-    temp_dir = tempfile.mkdtemp(prefix="find_my_phone_chrome_")
-    source_profile = settings.chrome_user_data_dir / settings.chrome_profile
-    dest_profile = Path(temp_dir) / settings.chrome_profile
+    temp_dir = _prepare_temp_profile(settings)
+    debug_port = _find_free_port()
 
-    if source_profile.exists():
-        logger.info("Copying Chrome profile from %s", source_profile)
-        shutil.copytree(
-            source_profile,
-            dest_profile,
-            ignore=shutil.ignore_patterns("SingletonLock", "SingletonSocket", "SingletonCookie"),
-        )
-    else:
-        logger.warning("Chrome profile not found at %s, using fresh profile", source_profile)
+    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    chrome_args = [
+        chrome_path,
+        f"--remote-debugging-port={debug_port}",
+        f"--user-data-dir={temp_dir}",
+        f"--profile-directory={settings.chrome_profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://accounts.google.com/EmbeddedSetup",
+    ]
 
-    options = uc.ChromeOptions()
-    options.add_argument(f"--user-data-dir={temp_dir}")
-    options.add_argument(f"--profile-directory={settings.chrome_profile}")
-    driver = uc.Chrome(options=options)
+    chrome_proc = subprocess.Popen(chrome_args)  # nosec B603
+    logger.info("Chrome launched with PID %d on debug port %d", chrome_proc.pid, debug_port)
 
     try:
-        driver.get("https://accounts.google.com/EmbeddedSetup")
-        logger.info("Waiting for login completion (up to 5 minutes)...")
+        time.sleep(CHROME_WAIT_SECONDS)
 
+        options = webdriver.ChromeOptions()
+        options.debugger_address = f"127.0.0.1:{debug_port}"
+        driver = webdriver.Chrome(options=options)
+
+        logger.info("Waiting for login completion (up to 5 minutes)...")
         WebDriverWait(driver, 300).until(lambda d: d.get_cookie("oauth_token") is not None)
 
         cookie = driver.get_cookie("oauth_token")
@@ -116,7 +166,8 @@ def request_oauth_token_via_chrome(settings: Settings) -> str:
         logger.info("OAuth token retrieved successfully")
         return token
     finally:
-        driver.quit()
+        chrome_proc.terminate()
+        chrome_proc.wait(timeout=CHROME_TERMINATE_TIMEOUT)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

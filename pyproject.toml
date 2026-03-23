@@ -20,7 +20,6 @@ dependencies = [
     "gpsoauth>=1.1.1",
     "protobuf>=5.28.0",
     "selenium>=4.27.1",
-    "undetected-chromedriver>=3.5.5",
 ]
 
 [dependency-groups]
