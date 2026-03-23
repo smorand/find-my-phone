@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import shutil
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import gpsoauth
@@ -16,8 +19,6 @@ import gpsoauth
 from tracing import trace_span
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from config import Settings
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,12 @@ def _get_android_id(settings: Settings) -> str:
     return android_id
 
 
-def request_oauth_token_via_chrome() -> str:
-    """Open Chrome to Google login and extract oauth_token cookie.
+def request_oauth_token_via_chrome(settings: Settings) -> str:
+    """Open Chrome with existing profile and extract oauth_token cookie.
+
+    Copies the user's Chrome profile to a temp directory so Chrome
+    can run even if the main browser is already open. The user's
+    existing Google session is preserved, avoiding a fresh login.
 
     Returns the oauth_token value after user completes login.
     """
@@ -78,7 +83,23 @@ def request_oauth_token_via_chrome() -> str:
 
     logger.info("Opening Chrome for Google login...")
 
+    temp_dir = tempfile.mkdtemp(prefix="find_my_phone_chrome_")
+    source_profile = settings.chrome_user_data_dir / settings.chrome_profile
+    dest_profile = Path(temp_dir) / settings.chrome_profile
+
+    if source_profile.exists():
+        logger.info("Copying Chrome profile from %s", source_profile)
+        shutil.copytree(
+            source_profile,
+            dest_profile,
+            ignore=shutil.ignore_patterns("SingletonLock", "SingletonSocket", "SingletonCookie"),
+        )
+    else:
+        logger.warning("Chrome profile not found at %s, using fresh profile", source_profile)
+
     options = uc.ChromeOptions()
+    options.add_argument(f"--user-data-dir={temp_dir}")
+    options.add_argument(f"--profile-directory={settings.chrome_profile}")
     driver = uc.Chrome(options=options)
 
     try:
@@ -96,6 +117,7 @@ def request_oauth_token_via_chrome() -> str:
         return token
     finally:
         driver.quit()
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def exchange_for_aas_token(settings: Settings, oauth_token: str) -> str:
@@ -162,7 +184,7 @@ def get_adm_token(settings: Settings) -> str:
 
 def login(settings: Settings) -> str:
     """Full login flow: Chrome login -> AAS token -> verify ADM token works."""
-    oauth_token = request_oauth_token_via_chrome()
+    oauth_token = request_oauth_token_via_chrome(settings)
     exchange_for_aas_token(settings, oauth_token)
     adm_token = get_adm_token(settings)
     logger.info("Login successful. Tokens cached.")

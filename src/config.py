@@ -21,3 +21,5 @@ class Settings(BaseSettings):
     app_name: str = "find_my_phone"
     debug: bool = False
     secrets_dir: Path = Path.home() / ".config" / "find-my-phone"
+    chrome_user_data_dir: Path = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+    chrome_profile: str = "Default"
