@@ -66,11 +66,12 @@ This project follows the `python` skill. Reload it for full coding standards ref
 
 ## Architecture Notes
 
-- Auth flow: Chrome login -> OAuth token -> gpsoauth AAS token -> ADM scoped token
+- Auth flow: Standard OAuth2 with localhost redirect -> access token cached + auto refresh on 401
 - Nova API: protobuf over HTTPS to `android.googleapis.com/nova/`
 - Location: parsed from device list response (last known), encrypted locations not yet supported
 - Ring: fire and forget (empty GCM registration ID)
 - Protobuf stubs (.pyi) are manually maintained for mypy compatibility
+- OAuth2 credentials: `~/.credentials/scm-pwd-web.json`
 
 ## Documentation Index
 

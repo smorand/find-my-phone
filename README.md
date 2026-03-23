@@ -109,10 +109,12 @@ You can also create a `.env` file in the project root.
 
 ## Authentication
 
-1. Run `find-my-phone login` to open a Chrome window
-2. Sign in to your Google account
-3. The tool captures an OAuth token and exchanges it for API access tokens
-4. Tokens are cached in `~/.config/find-my-phone/secrets.json`
+1. Run `find-my-phone login` to open Google consent in your browser
+2. Approve access (uses your existing Google session)
+3. The browser redirects to localhost, the tool captures the auth code
+4. Tokens are cached in `~/.config/find-my-phone/secrets.json` and auto-refreshed
+
+Requires OAuth2 client credentials at `~/.credentials/scm-pwd-web.json`.
 
 ## Log Files
 
