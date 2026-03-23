@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from auth import get_adm_token
+from auth import get_adm_token, refresh_access_token
 from proto import DeviceUpdate_pb2
 from tracing import trace_span
 
@@ -59,8 +59,11 @@ class Device:
     locations: list[DeviceLocation] = field(default_factory=list)
 
 
+HTTP_UNAUTHORIZED = 401
+
+
 def _nova_request(settings: Settings, scope: str, payload: bytes) -> bytes:
-    """Send a request to the Nova API."""
+    """Send a request to the Nova API. Refreshes token on 401."""
     url = f"{NOVA_BASE_URL}/{scope}"
     adm_token = get_adm_token(settings)
 
@@ -73,6 +76,12 @@ def _nova_request(settings: Settings, scope: str, payload: bytes) -> bytes:
 
     with httpx.Client(timeout=30.0) as client:
         response = client.post(url, headers=headers, content=payload)
+
+        if response.status_code == HTTP_UNAUTHORIZED:
+            logger.info("Token expired, refreshing...")
+            new_token = refresh_access_token(settings)
+            headers["Authorization"] = f"Bearer {new_token}"
+            response = client.post(url, headers=headers, content=payload)
 
     if response.status_code != HTTP_OK:
         logger.error("Nova API error (HTTP %s): %s", response.status_code, response.text)

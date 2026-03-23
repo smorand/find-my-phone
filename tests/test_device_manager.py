@@ -2,7 +2,7 @@
 
 import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -152,13 +152,15 @@ def test_nova_request_failure(settings: Settings) -> None:
     """Test _nova_request raises on HTTP error."""
     with (
         patch("device_manager.get_adm_token", return_value="test_token"),
+        patch("device_manager.refresh_access_token", return_value="refreshed_token"),
         patch("device_manager.httpx.Client") as mock_client_cls,
     ):
-        mock_response = mock_client_cls.return_value.__enter__.return_value.post.return_value
-        mock_response.status_code = 401
-        mock_response.text = "Unauthorized"
+        mock_client = mock_client_cls.return_value.__enter__.return_value
+        mock_response_401 = MagicMock(status_code=401, text="Unauthorized")
+        mock_response_500 = MagicMock(status_code=500, text="Server Error")
+        mock_client.post.side_effect = [mock_response_401, mock_response_500]
 
-        with pytest.raises(RuntimeError, match="401"):
+        with pytest.raises(RuntimeError, match="500"):
             _nova_request(settings, "nbe_list_devices", b"payload")
 
 
